@@ -9,6 +9,9 @@ from collections import OrderedDict
 
 import data
 import utils
+
+import torch
+from torch.nn.utils.rnn import pad_sequence
 import networks
 
 def seed_everything(seed=42):
@@ -102,14 +105,39 @@ def baseline_model_load(model_cfg, device):
     return model_G, parameter_G, model_D, parameter_D, model_F
 
 
+def collate_fn(batch):
+    """
+    Custom collate function to handle variable-length bounding box tensors.
+    """
+    images_A = torch.stack([b["A"] for b in batch])  # Stack images
+    images_B = torch.stack([b["B"] for b in batch])
+
+    # Pad bounding boxes to the max in the batch
+    def pad_boxes(boxes):
+        if boxes.shape[0] == 0:  # If no boxes, return a single row of zeros
+            return torch.zeros((1, 9), dtype=torch.float32, device=boxes.device)
+        return boxes
+
+    A_boxes = [pad_boxes(b["A_box"]) for b in batch]
+    B_boxes = [pad_boxes(b["B_box"]) for b in batch]
+
+    # Pad all bounding boxes to the maximum in the batch
+    A_boxes = pad_sequence(A_boxes, batch_first=True, padding_value=0)
+    B_boxes = pad_sequence(B_boxes, batch_first=True, padding_value=0)
+
+    return {"A": images_A, "B": images_B, "A_box": A_boxes, "B_box": B_boxes}
+
+
+
+
+
 def data_loader(data_cfg, batch_size, num_workers, train_mode):
-    datasets_dict = {"init": data.INIT_Dataset,
-                    "img2ir": data.Img2IR_Dataset}
+    datasets_dict = {"init": data.INIT_Dataset}
 
     selected_dataset = datasets_dict[data_cfg.dataset]
 
     dataset = selected_dataset(data_cfg,train_mode)
-    data_loader = DataLoader(dataset, batch_size, True,num_workers=num_workers, pin_memory=True, drop_last=True)
+    data_loader = DataLoader(dataset, batch_size, True,num_workers=num_workers, pin_memory=False, drop_last=True,collate_fn=collate_fn)
 
     return data_loader
 

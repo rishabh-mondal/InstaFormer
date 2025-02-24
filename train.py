@@ -37,7 +37,7 @@ if __name__ == "__main__":
         # configuration
         conf =  yaml.load(f, Loader=yaml.FullLoader)
         train_cfg = DotMap(conf['Train'])
-        device = torch.device("cuda" if train_cfg.use_cuda else "cpu")
+        device = torch.device("cuda:0" if train_cfg.use_cuda else "cpu")
 
         # seed 
         initialize.seed_everything(train_cfg.seed)
@@ -130,7 +130,7 @@ if __name__ == "__main__":
                 visualizer.plot_current_losses(epoch, float(i) / len(data_loader), {k: v.item() for k, v in losses.items()})
                 if (total_iters % train_cfg.display_iter) == 0:
                     current_visuals = {'real_img':inputs['A'], 'fake_img':fake_img, 'style_img':inputs['B'], 'recon_img':recon_img}
-                    visualizer.display_current_results(current_visuals, epoch,  (total_iters % train_cfg.save_img_iter == 0))
+                    # visualizer.display_current_results(current_visuals, epoch,  (total_iters % train_cfg.save_img_iter == 0))
 
                     # Save model & optimizer            
                 if (epoch % train_cfg.display_epoch) == 0:

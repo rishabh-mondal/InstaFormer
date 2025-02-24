@@ -47,7 +47,7 @@ class AdaIn_Transformer(nn.Module):
         return x
 
 class Transformer_Aggregator(nn.Module):
-    def __init__(self, img_size=88, patch_size=8, embed_C=1024, feat_C=256, depth=6, heads=4, mlp_dim=4096):
+    def __init__(self, img_size=160, patch_size=8, embed_C=1024, feat_C=256, depth=6, heads=4, mlp_dim=4096):
         super(Transformer_Aggregator, self).__init__()
         self.img_size = img_size
         self.patch_size = patch_size
@@ -72,26 +72,73 @@ class Transformer_Aggregator(nn.Module):
 
         self.transformer = AdaIn_Transformer(embed_C, depth, heads, feat_C, mlp_dim, dropout=0.)
 
+    def obb_to_aabb(self,obb):
+        """
+        Converts Oriented Bounding Boxes (OBB) to Axis-Aligned Bounding Boxes (AABB).
+        Assumes input format: [class_id, x1, y1, x2, y2, x3, y3, x4, y4].
+        Returns format: [x_min, y_min, x_max, y_max].
+
+        """
+        batch_size, num_boxes, _ = obb.shape
+        x_coords = obb[:, :, [1, 3, 5, 7]]  # Extract x1, x2, x3, x4
+        y_coords = obb[:, :, [2, 4, 6, 8]]  # Extract y1, y2, y3, y4
+
+        x_min = x_coords.min(dim=2, keepdim=False).values
+        y_min = y_coords.min(dim=2, keepdim=False).values
+        x_max = x_coords.max(dim=2, keepdim=False).values
+        y_max = y_coords.max(dim=2, keepdim=False).values
+
+        return torch.stack([x_min, y_min, x_max, y_max], dim=2)
+
+
     def extract_box_feature(self, out, box, num_box):
+        print('out', out.shape)
         b, c, h, w = out.shape
-        batch_index = torch.arange(0.0, b).repeat(num_box).view(num_box, -1).transpose(0,1).flatten(0,1).to(out.device)
-        roi_box_info = box.view(-1,5).to(out.device) 
+        print('box', box.shape)
+        # box = box.view(-1, 9)
+        # print('box_2', box.shape)
 
-        roi_info = torch.stack((batch_index, \
-                            roi_box_info[:, 1] * w, \
-                            roi_box_info[:, 2] * h, \
-                            roi_box_info[:, 3] * w, \
-                            roi_box_info[:, 4] * h), dim = 1).to(out.device)
-        aligned_out = roi_align(out, roi_info, 8) 
+        aabb_box = self.obb_to_aabb(box)
+        print('aabb_box', aabb_box.shape)
+        total_boxes = aabb_box.shape[0] * aabb_box.shape[1]
+        print('total_boxes', total_boxes)
+        # print('aabb_box', aabb_box)
 
-        aligned_out.view(b, num_box, c, 8, 8)[torch.where(box[:,:,0] == -1)] = 0
-        aligned_out.view(-1, c, 8, 8)        
+        # batch_index = torch.arange(0.0, b).repeat(num_box).view(num_box, -1).transpose(0,1).flatten(0,1).to(out.device)
+        # roi_box_info = box.view(-1,5).to(out.device) 
+        batch_index = torch.arange(b, dtype=torch.float32, device=out.device).repeat_interleave(aabb_box.shape[1]).view(-1, 1)
+        print('batch_index', batch_index.shape)
+        scale_tensor = torch.tensor([w, h, w, h], dtype=torch.float32, device=out.device).view(1, 1, 4)
+        print('scale_tensor', scale_tensor.shape)
+        aabb_box = (aabb_box * scale_tensor).reshape(total_boxes, 4)
+        print('aabb_box', aabb_box.shape)
+        roi_info = torch.cat((batch_index, aabb_box), dim=1)
+        print('roi_info', roi_info.shape)
 
-        return aligned_out
-    
+        # roi_info = torch.cat((batch_index.view(-1, 1), (aabb_box * scale_tensor).view(-1, 4)), dim=1)
+
+        aligned_out = roi_align(out, roi_info, output_size=(8, 8))
+        mask = (box[:, :, 0] == -1)
+        if mask.any():
+            aligned_out = aligned_out.view(b, num_box, c, 8, 8)
+            aligned_out[mask] = 0
+            aligned_out = aligned_out.view(-1, c, 8, 8)
+
+        return aligned_out    
+
+
     def add_box(self, out, box, box_info, num_box, pos_embed=None): 
         b = out.shape[0]
-        box = self.box_embed(box).squeeze().view(b, num_box, -1) 
+        print('out', out.shape)
+        embedded_box = self.box_embed(box)
+
+        print(f"box_embed output shape: {embedded_box.shape}")
+        print(f"embedded_box shape: {embedded_box.shape}, total elements: {embedded_box.numel()}, batch_size: {b}, num_box: {num_box}")
+
+        print(f"box shape: {box.shape}")
+
+
+        # box = self.box_embed(box).squeeze().view(b, num_box, -1) 
         
         x_coord = (box_info[..., 1::2].mean(dim=2) * (self.img_size - 1)).long() 
         y_coord = (box_info[..., 2::2].mean(dim=2) * (self.img_size - 1)).long() 
@@ -111,11 +158,15 @@ class Transformer_Aggregator(nn.Module):
         
         return added_out
 
+
+
     def forward(self, x, box_info=None, num_box=-1):
         embed_x = self.patch_embed(x) + self.pos_embed.to(x.device)
+        print('embed_x', embed_x.shape)
         
         if box_info != None:
             box_feat = self.extract_box_feature(x, box_info, num_box)
+            print('box_feat', box_feat.shape)
             embed_x = self.add_box(embed_x, box_feat, box_info, num_box)
         
         out = self.transformer(embed_x)
